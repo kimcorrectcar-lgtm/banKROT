@@ -1,0 +1,5 @@
+aiogram==3.22.0
+SQLAlchemy==2.0.43
+asyncpg==0.30.0
+python-dotenv==1.1.1
+aiohttp==3.12.15
