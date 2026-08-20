@@ -9,61 +9,49 @@ def consent_keyboard() -> ReplyKeyboardMarkup:
         keyboard=[
             [
                 KeyboardButton(
-                    text="✅ Я прочитал и соглашаюсь",
-                ),
+                    text="✅ Я прочитал и соглашаюсь"
+                )
             ],
             [
                 KeyboardButton(
-                    text="❌ Отказаться",
-                ),
+                    text="❌ Отказаться"
+                )
             ],
         ],
         resize_keyboard=True,
         one_time_keyboard=False,
-        input_field_placeholder=(
-            "Выберите вариант"
-        ),
     )
 
 
-def main_menu_keyboard() -> ReplyKeyboardMarkup:
+def main_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [
                 KeyboardButton(
-                    text="🧮 Оценить мою ситуацию",
+                    text="📋 Услуги"
+                ),
+                KeyboardButton(
+                    text="👤 Личный кабинет"
                 ),
             ],
             [
                 KeyboardButton(
-                    text="📋 Моя заявка",
+                    text="📄 Документы"
                 ),
                 KeyboardButton(
-                    text="💼 Услуги",
-                ),
-            ],
-            [
-                KeyboardButton(
-                    text="📄 Документы",
-                ),
-                KeyboardButton(
-                    text="👤 Личный кабинет",
+                    text="ℹ️ О нас"
                 ),
             ],
             [
                 KeyboardButton(
-                    text="ℹ️ О нас",
+                    text="📞 Связаться"
                 ),
                 KeyboardButton(
-                    text="📞 Связаться с нами",
+                    text="☎️ Позвонить"
                 ),
             ],
         ],
         resize_keyboard=True,
-        one_time_keyboard=False,
-        input_field_placeholder=(
-            "Выберите раздел"
-        ),
     )
 
 
@@ -72,62 +60,23 @@ def contact_keyboard() -> ReplyKeyboardMarkup:
         keyboard=[
             [
                 KeyboardButton(
-                    text="✍️ Оставить имя и телефон",
-                ),
+                    text="📱 Оставить имя и номер"
+                )
             ],
             [
                 KeyboardButton(
-                    text="📞 Позвонить нам",
-                ),
+                    text="💬 Написать в мессенджере"
+                )
             ],
             [
                 KeyboardButton(
-                    text="💬 Telegram",
-                ),
-                KeyboardButton(
-                    text="🟢 WhatsApp",
-                ),
+                    text="☎️ Позвонить"
+                )
             ],
             [
                 KeyboardButton(
-                    text="⬅️ Назад",
-                ),
-            ],
-        ],
-        resize_keyboard=True,
-    )
-
-
-def back_keyboard() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [
-                KeyboardButton(
-                    text="⬅️ Назад",
-                ),
-            ],
-            [
-                KeyboardButton(
-                    text="🏠 Главное меню",
-                ),
-            ],
-            [
-                KeyboardButton(
-                    text="📞 Связаться с нами",
-                ),
-            ],
-        ],
-        resize_keyboard=True,
-    )
-
-
-def cancel_keyboard() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [
-                KeyboardButton(
-                    text="❌ Отменить",
-                ),
+                    text="⬅️ Назад"
+                )
             ],
         ],
         resize_keyboard=True,
