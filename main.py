@@ -1,116 +1,89 @@
 import asyncio
 import logging
+import os
 
 from aiohttp import web
 from aiogram import Bot, Dispatcher
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
+from aiogram.fsm.storage.memory import MemoryStorage
+from dotenv import load_dotenv
 
-from config import (
-    BOT_TOKEN,
-    WEB_HOST,
-    WEB_PORT,
-    validate_config,
-)
-from database import (
-    close_database,
-    init_database,
-)
 from handlers import router
 
+load_dotenv()
+
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+PORT = int(os.getenv("PORT", "10000"))
 
 logging.basicConfig(
     level=logging.INFO,
-    format=(
-        "%(asctime)s | "
-        "%(levelname)s | "
-        "%(name)s | "
-        "%(message)s"
-    ),
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("bankrot")
 
 
-async def health_handler(
-    request: web.Request,
-) -> web.Response:
-    return web.json_response(
-        {
-            "status": "ok",
-            "service": "banKROT",
-        }
-    )
+async def health(request: web.Request) -> web.Response:
+    return web.Response(text="OK")
 
 
-async def start_web_server() -> web.AppRunner:
+async def start_health_server() -> web.AppRunner:
     app = web.Application()
 
-    app.router.add_get(
-        "/",
-        health_handler,
-    )
-
-    app.router.add_get(
-        "/health",
-        health_handler,
-    )
+    app.router.add_get("/", health)
+    app.router.add_get("/health", health)
 
     runner = web.AppRunner(app)
-
     await runner.setup()
 
     site = web.TCPSite(
         runner,
-        WEB_HOST,
-        WEB_PORT,
+        "0.0.0.0",
+        PORT,
     )
 
     await site.start()
 
     logger.info(
-        "Health server started on %s:%s",
-        WEB_HOST,
-        WEB_PORT,
+        "Health server started on port %s",
+        PORT,
     )
 
     return runner
 
 
 async def main() -> None:
-    validate_config()
-
-    logger.info("Starting banKROT...")
-
-    await init_database()
+    if not BOT_TOKEN:
+        raise RuntimeError(
+            "BOT_TOKEN is not configured"
+        )
 
     bot = Bot(
         token=BOT_TOKEN,
+        default=DefaultBotProperties(
+            parse_mode=ParseMode.HTML
+        ),
     )
 
-    dp = Dispatcher()
+    dp = Dispatcher(
+        storage=MemoryStorage()
+    )
 
     dp.include_router(router)
 
-    web_runner = await start_web_server()
+    health_runner = await start_health_server()
 
     try:
         logger.info(
-            "Telegram bot started",
+            "banKROT bot started"
         )
 
-        await dp.start_polling(
-            bot,
-        )
+        await dp.start_polling(bot)
 
     finally:
-        logger.info(
-            "Stopping banKROT...",
-        )
-
+        await health_runner.cleanup()
         await bot.session.close()
-
-        await web_runner.cleanup()
-
-        await close_database()
 
 
 if __name__ == "__main__":
