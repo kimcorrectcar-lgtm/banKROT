@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+import logging
 
 from aiogram import F, Router
 from aiogram.filters import CommandStart
@@ -33,6 +34,7 @@ from security import audit_actor_ref, clean_name, decrypt, encrypt, normalize_ph
 from texts import CONSENT_TEXT, SERVICES, WELCOME_TEXT
 
 router = Router()
+logger = logging.getLogger(__name__)
 
 
 class LeadForm(StatesGroup):
@@ -147,7 +149,7 @@ async def start_contact(message: Message, state: FSMContext):
         return await message.answer(CONSENT_TEXT, reply_markup=consent_keyboard())
     await state.clear()
     await state.set_state(ContactForm.name)
-    await message.answer("Введите имя для обратной связи.", reply_markup=back_keyboard())
+    await message.answer("📱 Оставить имя и номер\n\nВведите ваше имя.", reply_markup=back_keyboard())
 
 
 @router.message(CommandStart())
@@ -324,22 +326,62 @@ async def contact_name(message: Message, state: FSMContext):
 
 @router.message(ContactForm.phone)
 async def contact_phone(message: Message, state: FSMContext):
+    """Финальный шаг формы «Оставить имя и номер».
+
+    Обрабатываем и Telegram Contact, и обычный текстовый номер через одну
+    state-specific точку входа. Это важно для Reply-кнопки request_contact:
+    у такого сообщения message.text отсутствует, номер находится в message.contact.
+    """
     role = await ensure_access(message)
     if role is None:
         return
+
     if message.text == "◀️ Отмена":
         await state.clear()
         return await message.answer("Отменено.", reply_markup=main_keyboard(role))
-    phone = message.contact.phone_number if message.contact else message.text or ""
-    phone = normalize_phone(phone)
+
+    raw_phone = ""
+    if message.contact is not None:
+        # Принимаем номер именно из отправленного Telegram-контакта.
+        raw_phone = message.contact.phone_number or ""
+    elif message.text:
+        raw_phone = message.text
+
+    phone = normalize_phone(raw_phone)
     if not phone:
-        return await message.answer("Не удалось распознать номер.", reply_markup=phone_keyboard())
+        return await message.answer(
+            "Не удалось распознать номер. Нажмите «📱 Отправить мой номер» "
+            "или введите номер в формате +7XXXXXXXXXX.",
+            reply_markup=phone_keyboard(),
+        )
+
     data = await state.get_data()
-    lead = await create_lead(message.from_user.id, data["name"], phone, "Обратная связь")
-    await audit(message.from_user.id, role, "create_contact_request", "lead", str(lead.id))
-    await notify_manager(message, lead)
+    name = clean_name(str(data.get("name", "")))
+    if not name:
+        # Защита от потерянного/просроченного состояния FSM.
+        await state.clear()
+        return await message.answer(
+            "Сессия формы устарела. Нажмите «📱 Оставить имя и номер» и начните заново.",
+            reply_markup=contact_keyboard(),
+        )
+
+    try:
+        lead = await create_lead(message.from_user.id, name, phone, "Обратная связь")
+        await audit(message.from_user.id, role, "create_contact_request", "lead", str(lead.id))
+        await notify_manager(message, lead)
+    except Exception:
+        logger.exception("Failed to create contact request for Telegram ID %s", message.from_user.id)
+        return await message.answer(
+            "Не удалось сохранить обращение. Попробуйте ещё раз через несколько секунд "
+            "или свяжитесь с менеджером другим способом.",
+            reply_markup=contact_keyboard(),
+        )
+
     await state.clear()
-    await message.answer(f"✅ Запрос №{lead.id} передан менеджеру.", reply_markup=main_keyboard(role))
+    await message.answer(
+        f"✅ Запрос №{lead.id} передан менеджеру.",
+        reply_markup=main_keyboard(role),
+    )
 
 
 @router.message(F.text == "☎️ Позвонить")
