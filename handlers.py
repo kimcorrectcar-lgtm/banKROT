@@ -1,3 +1,4 @@
+import logging
 from datetime import datetime, timezone
 
 from aiogram import F, Router
@@ -25,6 +26,7 @@ from keyboards import (
     documents_keyboard,
     main_keyboard,
     phone_keyboard,
+    profile_actions_keyboard,
     service_actions_keyboard,
     services_keyboard,
 )
@@ -32,6 +34,7 @@ from models import Lead, SecurityAudit, Tester, User
 from security import audit_actor_ref, clean_name, decrypt, encrypt, normalize_phone, role_for
 from texts import CONSENT_TEXT, SERVICES, WELCOME_TEXT
 
+logger = logging.getLogger(__name__)
 router = Router()
 
 
@@ -43,6 +46,10 @@ class LeadForm(StatesGroup):
 class ContactForm(StatesGroup):
     name = State()
     phone = State()
+
+
+class DeleteForm(StatesGroup):
+    confirm = State()
 
 
 async def tester_ids() -> set[int]:
@@ -64,15 +71,61 @@ async def ensure_access(message: Message) -> str | None:
     return role
 
 
-async def save_user(message: Message) -> None:
+async def save_user(message: Message, *, name: str | None = None, phone: str | None = None) -> None:
     async with SessionLocal() as session:
         result = await session.execute(select(User).where(User.telegram_id == message.from_user.id))
         user = result.scalar_one_or_none()
         if user is None:
-            session.add(User(telegram_id=message.from_user.id, consented_at=datetime.now(timezone.utc)))
+            user = User(
+                telegram_id=message.from_user.id,
+                consented_at=datetime.now(timezone.utc),
+            )
+            session.add(user)
         else:
-            user.consented_at = datetime.now(timezone.utc)
+            user.consented_at = user.consented_at or datetime.now(timezone.utc)
+
+        if name:
+            user.name = encrypt(name)
+        if phone:
+            user.phone = encrypt(phone)
         await session.commit()
+
+
+async def get_user_profile(tid: int) -> tuple[str | None, str | None]:
+    """Return stored name/phone and transparently recover them from the latest lead for old users."""
+    async with SessionLocal() as session:
+        result = await session.execute(select(User).where(User.telegram_id == tid))
+        user = result.scalar_one_or_none()
+
+        name = decrypt(user.name) if user and user.name else None
+        phone = decrypt(user.phone) if user and user.phone else None
+
+        if name and phone:
+            return name, phone
+
+        # Compatibility with data created before the profile fields existed.
+        lead_result = await session.execute(
+            select(Lead)
+            .where(Lead.telegram_id == tid)
+            .order_by(Lead.created_at.desc())
+            .limit(1)
+        )
+        lead = lead_result.scalar_one_or_none()
+        if lead:
+            try:
+                name = name or decrypt(lead.name)
+                phone = phone or decrypt(lead.phone)
+            except ValueError:
+                logger.warning("Could not recover old encrypted profile for telegram_id=%s", tid)
+
+        if user and (name or phone):
+            if name:
+                user.name = encrypt(name)
+            if phone:
+                user.phone = encrypt(phone)
+            await session.commit()
+
+        return name, phone
 
 
 async def user_consented(tid: int) -> bool:
@@ -103,47 +156,110 @@ async def create_lead(tid: int, name: str, phone: str, service: str | None) -> L
             service=service,
         )
         session.add(lead)
+        await session.flush()
+
+        result = await session.execute(select(User).where(User.telegram_id == tid))
+        user = result.scalar_one_or_none()
+        if user is None:
+            user = User(telegram_id=tid, consented_at=datetime.now(timezone.utc))
+            session.add(user)
+        user.name = encrypt(name)
+        user.phone = encrypt(phone)
+
         await session.commit()
         await session.refresh(lead)
         return lead
 
 
 async def notify_manager(message: Message, lead: Lead) -> None:
+    """Manager notification must never break the user's successful request."""
     if not MANAGER_LEADS_CHAT_ID:
+        logger.warning("MANAGER_LEADS_CHAT_ID is not configured; lead #%s was saved", lead.id)
         return
     try:
         chat_id = int(MANAGER_LEADS_CHAT_ID)
-    except ValueError:
-        return
-    await message.bot.send_message(
-        chat_id,
-        "<b>🆕 Новая заявка banKROT</b>\n\n"
-        f"Заявка №{lead.id}\n"
-        f"Услуга: {lead.service or 'Не выбрана'}\n"
-        "Контактные данные доступны только авторизованному администратору в панели бота.\n"
-        f"Статус: {lead.status}",
+        await message.bot.send_message(
+            chat_id,
+            "<b>🆕 Новая заявка banKROT</b>\n\n"
+            f"Заявка №{lead.id}\n"
+            f"Услуга: {lead.service or 'Не выбрана'}\n"
+            "Контактные данные доступны только авторизованному администратору в панели бота.\n"
+            f"Статус: {lead.status}",
+        )
+    except Exception:
+        logger.exception("Manager notification failed for lead #%s", lead.id)
+
+
+async def submit_existing_profile(message: Message, role: str, service: str | None) -> bool:
+    name, phone = await get_user_profile(message.from_user.id)
+    if not name or not phone:
+        return False
+    lead = await create_lead(message.from_user.id, name, phone, service)
+    await audit(message.from_user.id, role, "create_lead_from_profile", "lead", str(lead.id))
+    await notify_manager(message, lead)
+    await message.answer(
+        f"✅ Заявка №{lead.id} принята. Использованы сохранённые имя и номер. Менеджер свяжется с вами.",
+        reply_markup=main_keyboard(role),
     )
+    return True
 
 
 async def start_lead(message: Message, state: FSMContext, service: str | None = None):
     if not await user_consented(message.from_user.id):
         return await message.answer(CONSENT_TEXT, reply_markup=consent_keyboard())
+
+    name, phone = await get_user_profile(message.from_user.id)
     await state.clear()
     await state.update_data(service=service)
-    await state.set_state(LeadForm.name)
+
+    if name and phone:
+        return await message.answer(
+            f"📝 <b>Оставить заявку</b>\n\n"
+            f"Имя: <b>{name}</b>\n"
+            f"Номер: <b>{phone}</b>\n\n"
+            "Данные уже сохранены в личном кабинете. Можно сразу отправить заявку менеджеру.",
+            reply_markup=profile_actions_keyboard(),
+        )
+
+    if not name:
+        await state.set_state(LeadForm.name)
+        return await message.answer(
+            "📝 <b>Оставить заявку</b>\n\nВведите имя. После сохранения повторно спрашивать его не будем.",
+            reply_markup=back_keyboard(),
+        )
+
+    await state.update_data(name=name)
+    await state.set_state(LeadForm.phone)
     await message.answer(
-        "📝 <b>Оставить заявку</b>\n\nВведите только имя.\n"
-        "Паспортные, медицинские и другие специальные данные не нужны.",
-        reply_markup=back_keyboard(),
+        f"Имя: <b>{name}</b> сохранено.\n\nТеперь сохраните номер телефона.",
+        reply_markup=phone_keyboard(),
     )
 
 
 async def start_contact(message: Message, state: FSMContext):
     if not await user_consented(message.from_user.id):
         return await message.answer(CONSENT_TEXT, reply_markup=consent_keyboard())
+
+    name, phone = await get_user_profile(message.from_user.id)
     await state.clear()
-    await state.set_state(ContactForm.name)
-    await message.answer("Введите имя для обратной связи.", reply_markup=back_keyboard())
+
+    if name and phone:
+        return await message.answer(
+            f"Ваши данные уже сохранены:\nИмя: <b>{name}</b>\nНомер: <b>{phone}</b>\n\n"
+            "Можно сразу передать запрос менеджеру.",
+            reply_markup=profile_actions_keyboard(contact_mode=True),
+        )
+
+    if not name:
+        await state.set_state(ContactForm.name)
+        return await message.answer("Введите имя. Я сохраню его в личном кабинете.", reply_markup=back_keyboard())
+
+    await state.update_data(name=name)
+    await state.set_state(ContactForm.phone)
+    await message.answer(
+        f"Имя: <b>{name}</b> уже сохранено. Теперь отправьте номер.",
+        reply_markup=phone_keyboard(),
+    )
 
 
 @router.message(CommandStart())
@@ -248,10 +364,33 @@ async def service_detail(message: Message, state: FSMContext):
 
 @router.message(F.text == "📝 Оставить заявку")
 async def new_lead(message: Message, state: FSMContext):
-    if await ensure_access(message) is None:
+    role = await ensure_access(message)
+    if role is None:
         return
     data = await state.get_data()
     await start_lead(message, state, data.get("service"))
+
+
+@router.message(F.text == "✅ Отправить заявку менеджеру")
+async def submit_profile_lead(message: Message, state: FSMContext):
+    role = await ensure_access(message)
+    if role is None:
+        return
+    data = await state.get_data()
+    service = data.get("service")
+    await state.clear()
+    if not await submit_existing_profile(message, role, service):
+        await start_lead(message, state, service)
+
+
+@router.message(F.text == "✏️ Изменить данные")
+async def edit_profile(message: Message, state: FSMContext):
+    role = await ensure_access(message)
+    if role is None:
+        return
+    await state.clear()
+    await state.set_state(LeadForm.name)
+    await message.answer("Введите новое имя. Затем я попрошу номер телефона.", reply_markup=back_keyboard())
 
 
 @router.message(LeadForm.name)
@@ -264,10 +403,10 @@ async def lead_name(message: Message, state: FSMContext):
         return await message.answer("Главное меню:", reply_markup=main_keyboard(role))
     name = clean_name(message.text or "")
     if not name:
-        return await message.answer("Введите имя без лишних символов, максимум 100 знаков.")
+        return await message.answer("Введите корректное имя, максимум 100 знаков.")
     await state.update_data(name=name)
     await state.set_state(LeadForm.phone)
-    await message.answer("Теперь отправьте номер кнопкой ниже или введите его вручную.", reply_markup=phone_keyboard())
+    await message.answer("Имя сохранено. Теперь отправьте номер кнопкой ниже или введите его вручную.", reply_markup=phone_keyboard())
 
 
 @router.message(LeadForm.phone)
@@ -275,24 +414,26 @@ async def lead_phone(message: Message, state: FSMContext):
     role = await ensure_access(message)
     if role is None:
         return
-    if message.text == "◀️ Отмена":
+    if message.text in {"◀️ Отмена", "◀️ В главное меню"}:
         await state.clear()
         return await message.answer("Заявка отменена.", reply_markup=main_keyboard(role))
     if message.contact and message.contact.user_id not in (None, message.from_user.id):
         return await message.answer("Пожалуйста, отправьте свой номер через кнопку ниже.", reply_markup=phone_keyboard())
-    phone = message.contact.phone_number if message.contact else message.text or ""
-    phone = normalize_phone(phone)
+    phone = normalize_phone(message.contact.phone_number if message.contact else message.text or "")
     if not phone:
-        return await message.answer("Не удалось распознать номер. Используйте кнопку отправки номера.", reply_markup=phone_keyboard())
+        return await message.answer("Не удалось распознать номер. Например: +79991234567", reply_markup=phone_keyboard())
     data = await state.get_data()
-    lead = await create_lead(message.from_user.id, data["name"], phone, data.get("service"))
+    name = data.get("name")
+    if not name:
+        name, _ = await get_user_profile(message.from_user.id)
+    if not name:
+        await state.set_state(LeadForm.name)
+        return await message.answer("Сначала укажите имя.", reply_markup=back_keyboard())
+    lead = await create_lead(message.from_user.id, name, phone, data.get("service"))
     await audit(message.from_user.id, role, "create_lead", "lead", str(lead.id))
     await notify_manager(message, lead)
     await state.clear()
-    await message.answer(
-        f"✅ Заявка №{lead.id} принята. Менеджер свяжется с вами.",
-        reply_markup=main_keyboard(role),
-    )
+    await message.answer(f"✅ Заявка №{lead.id} принята. Имя и номер сохранены в личном кабинете.", reply_markup=main_keyboard(role))
 
 
 @router.message(F.text == "📞 Связаться")
@@ -311,6 +452,21 @@ async def contact_lead(message: Message, state: FSMContext):
     await start_contact(message, state)
 
 
+@router.message(F.text == "✅ Передать мои данные менеджеру")
+async def submit_contact_profile(message: Message, state: FSMContext):
+    role = await ensure_access(message)
+    if role is None:
+        return
+    name, phone = await get_user_profile(message.from_user.id)
+    if not name or not phone:
+        return await start_contact(message, state)
+    await state.clear()
+    lead = await create_lead(message.from_user.id, name, phone, "Обратная связь")
+    await audit(message.from_user.id, role, "create_contact_request_from_profile", "lead", str(lead.id))
+    await notify_manager(message, lead)
+    await message.answer(f"✅ Запрос №{lead.id} передан менеджеру.", reply_markup=main_keyboard(role))
+
+
 @router.message(ContactForm.name)
 async def contact_name(message: Message, state: FSMContext):
     role = await ensure_access(message)
@@ -324,7 +480,7 @@ async def contact_name(message: Message, state: FSMContext):
         return await message.answer("Введите корректное имя.")
     await state.update_data(name=name)
     await state.set_state(ContactForm.phone)
-    await message.answer("Отправьте номер кнопкой ниже или введите его вручную.", reply_markup=phone_keyboard())
+    await message.answer("Имя сохранено. Теперь отправьте номер.", reply_markup=phone_keyboard())
 
 
 @router.message(ContactForm.phone)
@@ -332,21 +488,28 @@ async def contact_phone(message: Message, state: FSMContext):
     role = await ensure_access(message)
     if role is None:
         return
-    if message.text == "◀️ Отмена":
+    if message.text in {"◀️ Отмена", "◀️ В главное меню"}:
         await state.clear()
         return await message.answer("Отменено.", reply_markup=main_keyboard(role))
     if message.contact and message.contact.user_id not in (None, message.from_user.id):
         return await message.answer("Пожалуйста, отправьте свой номер через кнопку ниже.", reply_markup=phone_keyboard())
-    phone = message.contact.phone_number if message.contact else message.text or ""
-    phone = normalize_phone(phone)
+    phone = normalize_phone(message.contact.phone_number if message.contact else message.text or "")
     if not phone:
-        return await message.answer("Не удалось распознать номер.", reply_markup=phone_keyboard())
+        return await message.answer("Не удалось распознать номер. Например: +79991234567", reply_markup=phone_keyboard())
     data = await state.get_data()
-    lead = await create_lead(message.from_user.id, data["name"], phone, "Обратная связь")
+    name = data.get("name")
+    if not name:
+        name, _ = await get_user_profile(message.from_user.id)
+    if not name:
+        await state.set_state(ContactForm.name)
+        return await message.answer("Сначала укажите имя.", reply_markup=back_keyboard())
+    # Persist profile immediately, even if the manager notification later fails.
+    await save_user(message, name=name, phone=phone)
+    lead = await create_lead(message.from_user.id, name, phone, "Обратная связь")
     await audit(message.from_user.id, role, "create_contact_request", "lead", str(lead.id))
     await notify_manager(message, lead)
     await state.clear()
-    await message.answer(f"✅ Запрос №{lead.id} передан менеджеру.", reply_markup=main_keyboard(role))
+    await message.answer(f"✅ Запрос №{lead.id} передан менеджеру. Имя и номер сохранены.", reply_markup=main_keyboard(role))
 
 
 @router.message(F.text == "☎️ Позвонить")
@@ -377,11 +540,28 @@ async def messenger(message: Message, state: FSMContext):
 @router.message(F.text == "👤 Личный кабинет")
 async def cabinet(message: Message, state: FSMContext):
     await state.clear()
-    if await ensure_access(message) is None:
+    role = await ensure_access(message)
+    if role is None:
         return
     if not await user_consented(message.from_user.id):
         return await message.answer(CONSENT_TEXT, reply_markup=consent_keyboard())
-    await message.answer("<b>👤 Личный кабинет</b>\n\nВыберите раздел:", reply_markup=cabinet_keyboard())
+    name, phone = await get_user_profile(message.from_user.id)
+    profile = ["<b>👤 Личный кабинет</b>", ""]
+    profile.append(f"Имя: <b>{name or 'не указано'}</b>")
+    profile.append(f"Телефон: <b>{phone or 'не указан'}</b>")
+    profile.append("")
+    profile.append("Сохранённые данные используются повторно и не запрашиваются заново, пока вы сами их не измените.")
+    await message.answer("\n".join(profile), reply_markup=cabinet_keyboard())
+
+
+@router.message(F.text == "✏️ Изменить мои данные")
+async def change_profile(message: Message, state: FSMContext):
+    role = await ensure_access(message)
+    if role is None:
+        return
+    await state.clear()
+    await state.set_state(LeadForm.name)
+    await message.answer("Введите новое имя. После этого бот попросит новый номер телефона.", reply_markup=back_keyboard())
 
 
 @router.message(F.text == "🗂 Мои заявки")
@@ -421,10 +601,6 @@ async def delete_my_data(message: Message, state: FSMContext):
     await state.clear()
     await state.set_state(DeleteForm.confirm)
     await message.answer("Удалить данные профиля и все заявки? Это действие необратимо.", reply_markup=delete_confirmation_keyboard())
-
-
-class DeleteForm(StatesGroup):
-    confirm = State()
 
 
 @router.message(DeleteForm.confirm, F.text == "🗑 Да, удалить")
