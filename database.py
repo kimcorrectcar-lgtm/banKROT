@@ -1,51 +1,32 @@
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.engine import make_url
 
 from config import DATABASE_URL
 
-engine = None
-SessionLocal = None
+
+def normalize_database_url(url: str) -> str:
+    parsed = make_url(url)
+    if parsed.drivername in {"postgresql", "postgres"}:
+        parsed = parsed.set(drivername="postgresql+asyncpg")
+    return parsed.render_as_string(hide_password=False)
 
 
-def normalize_database_url(url: str | None) -> str | None:
-    if not url:
-        return None
-
-    if url.startswith("postgres://"):
-        return "postgresql+asyncpg://" + url[len("postgres://"):]
-
-    if url.startswith("postgresql://"):
-        return "postgresql+asyncpg://" + url[len("postgresql://"):]
-
-    return url
-
-
-DATABASE_URL = normalize_database_url(DATABASE_URL)
-
-
-if DATABASE_URL:
-    engine = create_async_engine(
-        DATABASE_URL,
-        pool_pre_ping=True,
-        pool_recycle=1800,
-    )
-
-    SessionLocal = async_sessionmaker(
-        engine,
-        class_=AsyncSession,
-        expire_on_commit=False,
-    )
+DB_URL = normalize_database_url(DATABASE_URL)
+engine = create_async_engine(
+    DB_URL,
+    pool_pre_ping=True,
+    pool_recycle=1800,
+    connect_args={"ssl": "require"},
+)
+SessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 
 async def init_db() -> None:
-    if engine is None:
-        return
-
     from models import Base
 
-    async with engine.begin() as connection:
-        await connection.run_sync(Base.metadata.create_all)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
 
 
 async def close_db() -> None:
-    if engine is not None:
-        await engine.dispose()
+    await engine.dispose()
