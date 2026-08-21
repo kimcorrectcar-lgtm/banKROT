@@ -97,7 +97,7 @@ def admin_testers_keyboard():
 
 
 def admin_leads_keyboard():
-    return kb([["🔎 Заявка по ID"], ["✏️ Изменить статус"], ["🔙 В админ-меню"]])
+    return kb([["✏️ Изменить статус"], ["🔙 В админ-меню"]])
 
 
 def admin_status_keyboard():
