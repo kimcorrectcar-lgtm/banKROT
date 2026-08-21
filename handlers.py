@@ -269,36 +269,56 @@ async def submit_existing_profile(
     role: str,
     service: str | None,
 ) -> bool:
-    name, phone = await get_user_profile(message.from_user.id)
+    """Create a lead from an already saved profile without silent failures."""
+    try:
+        name, phone = await get_user_profile(message.from_user.id)
 
-    if not name or not phone:
-        return False
+        if not name or not phone:
+            return False
 
-    lead = await create_lead(
-        message.from_user.id,
-        name,
-        phone,
-        service,
-    )
+        lead = await create_lead(
+            message.from_user.id,
+            name,
+            phone,
+            service,
+        )
 
-    await audit(
-        message.from_user.id,
-        role,
-        "create_lead_from_profile",
-        "lead",
-        str(lead.id),
-    )
+        # Audit is secondary: a logging failure must not make a successful
+        # user action look like a silent failure.
+        try:
+            await audit(
+                message.from_user.id,
+                role,
+                "create_lead_from_profile",
+                "lead",
+                str(lead.id),
+            )
+        except Exception:
+            logger.exception("Audit failed after lead #%s was created", lead.id)
 
-    await notify_manager(message, lead)
+        await notify_manager(message, lead)
 
-    await message.answer(
-        f"✅ Заявка №{lead.id} принята. "
-        "Использованы сохранённые имя и номер. "
-        "Менеджер свяжется с вами.",
-        reply_markup=main_keyboard(role),
-    )
+        await message.answer(
+            f"✅ Заявка №{lead.id} принята.\n"
+            "Использованы сохранённые имя и номер.\n"
+            "Менеджер свяжется с вами.",
+            reply_markup=main_keyboard(role),
+        )
+        return True
 
-    return True
+    except Exception:
+        logger.exception(
+            "Saved-profile lead submission failed for telegram_id=%s",
+            message.from_user.id,
+        )
+        await message.answer(
+            "⚠️ Не удалось отправить заявку менеджеру.\n\n"
+            "Ваши сохранённые имя и номер не удалены. "
+            "Попробуйте ещё раз через «Оставить заявку»."
+            ,
+            reply_markup=main_keyboard(role),
+        )
+        return True
 
 
 async def start_lead(
@@ -814,43 +834,50 @@ async def submit_contact_profile(
     if role is None:
         return
 
-    name, phone = await get_user_profile(
-        message.from_user.id
-    )
+    try:
+        name, phone = await get_user_profile(message.from_user.id)
 
-    if not name or not phone:
-        await start_contact(
-            message,
-            state,
+        if not name or not phone:
+            await start_contact(message, state)
+            return
+
+        lead = await create_lead(
+            message.from_user.id,
+            name,
+            phone,
+            "Обратная связь",
         )
-        return
 
-    await state.clear()
+        try:
+            await audit(
+                message.from_user.id,
+                role,
+                "create_contact_request_from_profile",
+                "lead",
+                str(lead.id),
+            )
+        except Exception:
+            logger.exception("Audit failed after contact lead #%s was created", lead.id)
 
-    lead = await create_lead(
-        message.from_user.id,
-        name,
-        phone,
-        "Обратная связь",
-    )
+        await notify_manager(message, lead)
+        await state.clear()
 
-    await audit(
-        message.from_user.id,
-        role,
-        "create_contact_request_from_profile",
-        "lead",
-        str(lead.id),
-    )
-
-    await notify_manager(
-        message,
-        lead,
-    )
-
-    await message.answer(
-        f"✅ Запрос №{lead.id} передан менеджеру.",
-        reply_markup=main_keyboard(role),
-    )
+        await message.answer(
+            f"✅ Запрос №{lead.id} передан менеджеру.",
+            reply_markup=main_keyboard(role),
+        )
+    except Exception:
+        logger.exception(
+            "Saved-profile contact submission failed for telegram_id=%s",
+            message.from_user.id,
+        )
+        await state.clear()
+        await message.answer(
+            "⚠️ Не удалось передать запрос менеджеру.\n\n"
+            "Сохранённые данные профиля не удалены. "
+            "Попробуйте ещё раз.",
+            reply_markup=main_keyboard(role),
+        )
 
 
 @router.message(ContactForm.name)
