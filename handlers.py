@@ -45,6 +45,10 @@ class ContactForm(StatesGroup):
     phone = State()
 
 
+class DeleteForm(StatesGroup):
+    confirm = State()
+
+
 async def tester_ids() -> set[int]:
     ids = set(ENV_TESTER_IDS)
     async with SessionLocal() as session:
@@ -218,7 +222,6 @@ async def decline(message: Message, state: FSMContext):
         return
     await state.clear()
     async with SessionLocal() as session:
-        await session.execute(delete(SecurityAudit).where(SecurityAudit.actor_telegram_id == int(audit_actor_ref(message.from_user.id)[:15], 16)))
         await session.execute(delete(Lead).where(Lead.telegram_id == message.from_user.id))
         await session.execute(delete(User).where(User.telegram_id == message.from_user.id))
         await session.commit()
@@ -408,10 +411,6 @@ async def delete_my_data(message: Message, state: FSMContext):
     await message.answer("Удалить данные профиля и все заявки? Это действие необратимо.", reply_markup=delete_confirmation_keyboard())
 
 
-class DeleteForm(StatesGroup):
-    confirm = State()
-
-
 @router.message(DeleteForm.confirm, F.text == "🗑 Да, удалить")
 async def confirm_delete(message: Message, state: FSMContext):
     role = await ensure_access(message)
@@ -419,7 +418,6 @@ async def confirm_delete(message: Message, state: FSMContext):
         return
     async with SessionLocal() as session:
         await session.execute(delete(Lead).where(Lead.telegram_id == message.from_user.id))
-        await session.execute(delete(SecurityAudit).where(SecurityAudit.actor_telegram_id == int(audit_actor_ref(message.from_user.id)[:15], 16)))
         await session.execute(delete(User).where(User.telegram_id == message.from_user.id))
         await session.commit()
     await state.clear()
