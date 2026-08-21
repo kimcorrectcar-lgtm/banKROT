@@ -20,7 +20,6 @@ class TesterForm(StatesGroup):
 
 
 class LeadForm(StatesGroup):
-    view_id = State()
     status_id = State()
     status = State()
 
@@ -121,39 +120,6 @@ async def leads(message: Message):
     lines = ["<b>📋 Последние заявки</b>"]
     lines += [f"№{x.id} | {x.service or 'Обращение'} | <b>{x.status}</b>" for x in rows]
     await message.answer("\n".join(lines), reply_markup=admin_leads_keyboard())
-
-
-@router.message(F.text == "🔎 Заявка по ID")
-async def view_start(message: Message, state: FSMContext):
-    if not await is_admin(message):
-        return await deny(message)
-    await state.set_state(LeadForm.view_id)
-    await message.answer("Введите номер заявки.", reply_markup=back_keyboard())
-
-
-@router.message(LeadForm.view_id)
-async def view_lead(message: Message, state: FSMContext):
-    if not await is_admin(message):
-        return await deny(message)
-    try:
-        lid = int((message.text or "").strip())
-    except ValueError:
-        return await message.answer("Номер заявки должен быть числом.")
-    async with SessionLocal() as session:
-        lead = await session.get(Lead, lid)
-    if lead is None:
-        return await message.answer("Заявка не найдена.", reply_markup=admin_leads_keyboard())
-    text = (
-        f"<b>Заявка №{lead.id}</b>\n\n"
-        f"Услуга: {lead.service or 'Не указана'}\n"
-        f"Статус: <b>{lead.status}</b>\n"
-        f"Имя: {decrypt(lead.name)}\n"
-        f"Телефон: {decrypt(lead.phone)}\n"
-        f"Создана: {lead.created_at}"
-    )
-    await audit(message.from_user.id, "admin", "view_lead", "lead", str(lid))
-    await state.clear()
-    await message.answer(text, reply_markup=admin_leads_keyboard())
 
 
 @router.message(F.text == "✏️ Изменить статус")
