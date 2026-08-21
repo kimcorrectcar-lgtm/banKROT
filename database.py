@@ -21,32 +21,16 @@ engine = create_async_engine(
 )
 SessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
-# PostgreSQL session-level advisory lock. It prevents two Render instances
-# from polling Telegram with the same bot token at the same time.
-POLLING_LOCK_SQL = "SELECT pg_advisory_lock(hashtextextended('bankrot:telegram_polling', 0))"
-
 
 async def init_db() -> None:
     from models import Base
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-
-
-async def acquire_polling_lock():
-    conn = await engine.connect()
-    try:
-        await conn.execute(text(POLLING_LOCK_SQL))
-        return conn
-    except Exception:
-        await conn.close()
-        raise
-
-
-async def release_polling_lock(conn) -> None:
-    if conn is None:
-        return
-    await conn.close()
+        # create_all() does not add new columns to an existing PostgreSQL table.
+        # These idempotent ALTERs keep old installations compatible after upgrade.
+        await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS name TEXT"))
+        await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS phone TEXT"))
 
 
 async def close_db() -> None:
