@@ -85,15 +85,11 @@ def contact_keyboard():
 
 
 def phone_keyboard():
-    return kb([["◀️ В главное меню"]], contact_button=True)
+    return kb([["◀️ Отмена"]], contact_button=True)
 
 
 def back_keyboard():
     return kb([["◀️ В главное меню"]])
-
-
-def admin_back_keyboard():
-    return kb([["🔙 В админ-меню"], ["🔙 В главное меню"]])
 
 
 def admin_keyboard():
