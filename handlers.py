@@ -59,7 +59,20 @@ class DeleteForm(StatesGroup):
 
 
 def is_back(text: str | None) -> bool:
-    return text in {"◀️ В главное меню", "◀️ Отмена"}
+    return text in {"◀️ В главное меню", "◀️ Отмена", "🔙 В главное меню"}
+
+
+def safe_decrypt(value: str | None) -> str | None:
+    """Decrypt a stored value; transparently keep legacy plaintext values readable."""
+    if not value:
+        return None
+    try:
+        return decrypt(value)
+    except ValueError:
+        # Older database versions may contain plaintext profile/lead data.
+        # Do not lock the user out of the bot; migrate it on the next save.
+        logger.warning("Found legacy plaintext/invalid encrypted value; using it as-is")
+        return value
 
 
 async def tester_ids() -> set[int]:
@@ -118,20 +131,13 @@ async def save_user(
 
 
 async def get_user_profile(tid: int) -> tuple[str | None, str | None]:
-    """
-    Return saved name/phone.
-
-    For old installations, recover missing profile values from the latest
-    lead and migrate them into User.
-    """
+    """Return saved profile and migrate missing values from the latest lead."""
     async with SessionLocal() as session:
-        result = await session.execute(
-            select(User).where(User.telegram_id == tid)
-        )
+        result = await session.execute(select(User).where(User.telegram_id == tid))
         user = result.scalar_one_or_none()
 
-        name = decrypt(user.name) if user and user.name else None
-        phone = decrypt(user.phone) if user and user.phone else None
+        name = safe_decrypt(user.name) if user and user.name else None
+        phone = safe_decrypt(user.phone) if user and user.phone else None
 
         if name and phone:
             return name, phone
@@ -145,14 +151,8 @@ async def get_user_profile(tid: int) -> tuple[str | None, str | None]:
         lead = lead_result.scalar_one_or_none()
 
         if lead:
-            try:
-                name = name or decrypt(lead.name)
-                phone = phone or decrypt(lead.phone)
-            except Exception:
-                logger.exception(
-                    "Could not recover old encrypted profile for telegram_id=%s",
-                    tid,
-                )
+            name = name or safe_decrypt(lead.name)
+            phone = phone or safe_decrypt(lead.phone)
 
         if user and (name or phone):
             if name:
@@ -203,35 +203,47 @@ async def create_lead(
     phone: str,
     service: str | None,
 ) -> Lead:
+    """Atomically save a lead and the user's profile."""
     async with SessionLocal() as session:
-        lead = Lead(
-            telegram_id=tid,
-            name=encrypt(name),
-            phone=encrypt(phone),
-            service=service,
-        )
-        session.add(lead)
-        await session.flush()
-
-        result = await session.execute(
-            select(User).where(User.telegram_id == tid)
-        )
-        user = result.scalar_one_or_none()
-
-        if user is None:
-            user = User(
-                telegram_id=tid,
-                consented_at=datetime.now(timezone.utc),
+        try:
+            result = await session.execute(
+                select(User).where(User.telegram_id == tid)
             )
-            session.add(user)
+            user = result.scalar_one_or_none()
 
-        user.name = encrypt(name)
-        user.phone = encrypt(phone)
+            if user is None:
+                user = User(
+                    telegram_id=tid,
+                    consented_at=datetime.now(timezone.utc),
+                )
+                session.add(user)
 
-        await session.commit()
-        await session.refresh(lead)
+            # Always keep the profile current. The user has explicitly supplied
+            # these values at this point.
+            user.name = encrypt(name)
+            user.phone = encrypt(phone)
+            user.consented_at = user.consented_at or datetime.now(timezone.utc)
 
-        return lead
+            lead = Lead(
+                telegram_id=tid,
+                name=encrypt(name),
+                phone=encrypt(phone),
+                service=service,
+                status="Новая",
+            )
+            session.add(lead)
+            await session.flush()
+            await session.commit()
+            await session.refresh(lead)
+            return lead
+        except Exception:
+            await session.rollback()
+            logger.exception(
+                "CREATE LEAD FAILED: telegram_id=%s service=%r",
+                tid,
+                service,
+            )
+            raise
 
 
 async def notify_manager(message: Message, lead: Lead) -> None:
@@ -269,10 +281,9 @@ async def submit_existing_profile(
     role: str,
     service: str | None,
 ) -> bool:
-    """Create a lead from an already saved profile without silent failures."""
+    """Create a lead from the saved profile; never silently lose the action."""
     try:
         name, phone = await get_user_profile(message.from_user.id)
-
         if not name or not phone:
             return False
 
@@ -283,8 +294,6 @@ async def submit_existing_profile(
             service,
         )
 
-        # Audit is secondary: a logging failure must not make a successful
-        # user action look like a silent failure.
         try:
             await audit(
                 message.from_user.id,
@@ -297,28 +306,21 @@ async def submit_existing_profile(
             logger.exception("Audit failed after lead #%s was created", lead.id)
 
         await notify_manager(message, lead)
-
         await message.answer(
-            f"✅ Заявка №{lead.id} принята.\n"
-            "Использованы сохранённые имя и номер.\n"
-            "Менеджер свяжется с вами.",
+            f"✅ Заявка №{lead.id} принята.\n\n"
+            "Использованы сохранённые имя и номер. Менеджер свяжется с вами.",
             reply_markup=main_keyboard(role),
         )
         return True
-
     except Exception:
         logger.exception(
             "Saved-profile lead submission failed for telegram_id=%s",
             message.from_user.id,
         )
-        logger.exception(
-            "Saved-profile lead submission failed for telegram_id=%s",
-            message.from_user.id,
-        )
         await message.answer(
-            "⚠️ Не удалось создать заявку. Ваши сохранённые имя и номер "
-            "остались в личном кабинете. Попробуйте ещё раз.",
-            reply_markup=main_keyboard(role),
+            "⚠️ Не удалось создать заявку из-за ошибки базы данных.\n\n"
+            "Ваши имя и номер сохранены. Нажмите кнопку ещё раз; данные вводить заново не нужно.",
+            reply_markup=profile_actions_keyboard(),
         )
         return False
 
@@ -611,17 +613,7 @@ async def submit_profile_lead(
     service = data.get("service")
 
     await state.clear()
-
-    if not await submit_existing_profile(
-        message,
-        role,
-        service,
-    ):
-        await start_lead(
-            message,
-            state,
-            service,
-        )
+    await submit_existing_profile(message, role, service)
 
 
 @router.message(F.text == "✏️ Изменить данные")
@@ -753,7 +745,8 @@ async def lead_phone(
         )
         return
 
-    await state.clear()
+    # Keep the FSM data until the explicit submit button is pressed so the
+    # selected service is preserved. Menu buttons clear the state themselves.
     await message.answer(
         "✅ Номер сохранён в личном кабинете.\n\n"
         "Имя и номер готовы. Теперь выберите, что сделать:",
@@ -958,7 +951,6 @@ async def contact_phone(
         )
         return
 
-    await state.clear()
     await message.answer(
         "✅ Номер сохранён в личном кабинете.\n\n"
         "Имя и номер готовы. Передать их менеджеру?",
