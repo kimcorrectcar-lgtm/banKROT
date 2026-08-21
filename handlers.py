@@ -1,5 +1,4 @@
 from datetime import datetime, timezone
-import logging
 
 from aiogram import F, Router
 from aiogram.filters import CommandStart
@@ -34,7 +33,6 @@ from security import audit_actor_ref, clean_name, decrypt, encrypt, normalize_ph
 from texts import CONSENT_TEXT, SERVICES, WELCOME_TEXT
 
 router = Router()
-logger = logging.getLogger(__name__)
 
 
 class LeadForm(StatesGroup):
@@ -45,10 +43,6 @@ class LeadForm(StatesGroup):
 class ContactForm(StatesGroup):
     name = State()
     phone = State()
-
-
-class DeleteForm(StatesGroup):
-    confirm = State()
 
 
 async def tester_ids() -> set[int]:
@@ -149,7 +143,7 @@ async def start_contact(message: Message, state: FSMContext):
         return await message.answer(CONSENT_TEXT, reply_markup=consent_keyboard())
     await state.clear()
     await state.set_state(ContactForm.name)
-    await message.answer("📱 Оставить имя и номер\n\nВведите ваше имя.", reply_markup=back_keyboard())
+    await message.answer("Введите имя для обратной связи.", reply_markup=back_keyboard())
 
 
 @router.message(CommandStart())
@@ -166,14 +160,16 @@ async def start(message: Message, state: FSMContext):
 
 
 @router.message(F.text == "📄 Документы")
-async def documents(message: Message):
+async def documents(message: Message, state: FSMContext):
+    await state.clear()
     if await ensure_access(message) is None:
         return
     await message.answer("<b>📄 Документы</b>\n\nВыберите документ:", reply_markup=documents_keyboard())
 
 
 @router.message(F.text == "📄 Политика конфиденциальности")
-async def privacy(message: Message):
+async def privacy(message: Message, state: FSMContext):
+    await state.clear()
     if await ensure_access(message) is None:
         return
     await message.answer(
@@ -185,7 +181,8 @@ async def privacy(message: Message):
 
 
 @router.message(F.text == "📄 Согласие на обработку ПД")
-async def pd_consent(message: Message):
+async def pd_consent(message: Message, state: FSMContext):
+    await state.clear()
     if await ensure_access(message) is None:
         return
     await message.answer(
@@ -197,7 +194,8 @@ async def pd_consent(message: Message):
 
 
 @router.message(F.text == "📄 Пользовательские условия")
-async def terms(message: Message):
+async def terms(message: Message, state: FSMContext):
+    await state.clear()
     if await ensure_access(message) is None:
         return
     await message.answer(
@@ -224,6 +222,7 @@ async def decline(message: Message, state: FSMContext):
         return
     await state.clear()
     async with SessionLocal() as session:
+        await session.execute(delete(SecurityAudit).where(SecurityAudit.actor_telegram_id == int(audit_actor_ref(message.from_user.id)[:15], 16)))
         await session.execute(delete(Lead).where(Lead.telegram_id == message.from_user.id))
         await session.execute(delete(User).where(User.telegram_id == message.from_user.id))
         await session.commit()
@@ -231,7 +230,8 @@ async def decline(message: Message, state: FSMContext):
 
 
 @router.message(F.text == "📋 Услуги")
-async def services(message: Message):
+async def services(message: Message, state: FSMContext):
+    await state.clear()
     if await ensure_access(message) is None:
         return
     await message.answer("<b>📋 Услуги</b>\n\nВыберите услугу:", reply_markup=services_keyboard())
@@ -259,7 +259,7 @@ async def lead_name(message: Message, state: FSMContext):
     role = await ensure_access(message)
     if role is None:
         return
-    if message.text and message.text.startswith("◀️"):
+    if message.text in {"◀️ В главное меню", "◀️ Отмена"}:
         await state.clear()
         return await message.answer("Главное меню:", reply_markup=main_keyboard(role))
     name = clean_name(message.text or "")
@@ -278,6 +278,8 @@ async def lead_phone(message: Message, state: FSMContext):
     if message.text == "◀️ Отмена":
         await state.clear()
         return await message.answer("Заявка отменена.", reply_markup=main_keyboard(role))
+    if message.contact and message.contact.user_id not in (None, message.from_user.id):
+        return await message.answer("Пожалуйста, отправьте свой номер через кнопку ниже.", reply_markup=phone_keyboard())
     phone = message.contact.phone_number if message.contact else message.text or ""
     phone = normalize_phone(phone)
     if not phone:
@@ -295,7 +297,8 @@ async def lead_phone(message: Message, state: FSMContext):
 
 @router.message(F.text == "📞 Связаться")
 @router.message(F.text == "📞 Связаться с менеджером")
-async def contact(message: Message):
+async def contact(message: Message, state: FSMContext):
+    await state.clear()
     if await ensure_access(message) is None:
         return
     await message.answer("<b>📞 Связаться с менеджером</b>\n\nВыберите способ связи:", reply_markup=contact_keyboard())
@@ -313,7 +316,7 @@ async def contact_name(message: Message, state: FSMContext):
     role = await ensure_access(message)
     if role is None:
         return
-    if message.text and message.text.startswith("◀️"):
+    if message.text in {"◀️ В главное меню", "◀️ Отмена"}:
         await state.clear()
         return await message.answer("Главное меню:", reply_markup=main_keyboard(role))
     name = clean_name(message.text or "")
@@ -326,66 +329,29 @@ async def contact_name(message: Message, state: FSMContext):
 
 @router.message(ContactForm.phone)
 async def contact_phone(message: Message, state: FSMContext):
-    """Финальный шаг формы «Оставить имя и номер».
-
-    Обрабатываем и Telegram Contact, и обычный текстовый номер через одну
-    state-specific точку входа. Это важно для Reply-кнопки request_contact:
-    у такого сообщения message.text отсутствует, номер находится в message.contact.
-    """
     role = await ensure_access(message)
     if role is None:
         return
-
     if message.text == "◀️ Отмена":
         await state.clear()
         return await message.answer("Отменено.", reply_markup=main_keyboard(role))
-
-    raw_phone = ""
-    if message.contact is not None:
-        # Принимаем номер именно из отправленного Telegram-контакта.
-        raw_phone = message.contact.phone_number or ""
-    elif message.text:
-        raw_phone = message.text
-
-    phone = normalize_phone(raw_phone)
+    if message.contact and message.contact.user_id not in (None, message.from_user.id):
+        return await message.answer("Пожалуйста, отправьте свой номер через кнопку ниже.", reply_markup=phone_keyboard())
+    phone = message.contact.phone_number if message.contact else message.text or ""
+    phone = normalize_phone(phone)
     if not phone:
-        return await message.answer(
-            "Не удалось распознать номер. Нажмите «📱 Отправить мой номер» "
-            "или введите номер в формате +7XXXXXXXXXX.",
-            reply_markup=phone_keyboard(),
-        )
-
+        return await message.answer("Не удалось распознать номер.", reply_markup=phone_keyboard())
     data = await state.get_data()
-    name = clean_name(str(data.get("name", "")))
-    if not name:
-        # Защита от потерянного/просроченного состояния FSM.
-        await state.clear()
-        return await message.answer(
-            "Сессия формы устарела. Нажмите «📱 Оставить имя и номер» и начните заново.",
-            reply_markup=contact_keyboard(),
-        )
-
-    try:
-        lead = await create_lead(message.from_user.id, name, phone, "Обратная связь")
-        await audit(message.from_user.id, role, "create_contact_request", "lead", str(lead.id))
-        await notify_manager(message, lead)
-    except Exception:
-        logger.exception("Failed to create contact request for Telegram ID %s", message.from_user.id)
-        return await message.answer(
-            "Не удалось сохранить обращение. Попробуйте ещё раз через несколько секунд "
-            "или свяжитесь с менеджером другим способом.",
-            reply_markup=contact_keyboard(),
-        )
-
+    lead = await create_lead(message.from_user.id, data["name"], phone, "Обратная связь")
+    await audit(message.from_user.id, role, "create_contact_request", "lead", str(lead.id))
+    await notify_manager(message, lead)
     await state.clear()
-    await message.answer(
-        f"✅ Запрос №{lead.id} передан менеджеру.",
-        reply_markup=main_keyboard(role),
-    )
+    await message.answer(f"✅ Запрос №{lead.id} передан менеджеру.", reply_markup=main_keyboard(role))
 
 
 @router.message(F.text == "☎️ Позвонить")
-async def call_manager(message: Message):
+async def call_manager(message: Message, state: FSMContext):
+    await state.clear()
     if await ensure_access(message) is None:
         return
     text = "<b>☎️ Позвонить менеджеру</b>\n\n"
@@ -394,7 +360,8 @@ async def call_manager(message: Message):
 
 
 @router.message(F.text == "💬 Написать в мессенджере")
-async def messenger(message: Message):
+async def messenger(message: Message, state: FSMContext):
+    await state.clear()
     if await ensure_access(message) is None:
         return
     lines = ["<b>💬 Мессенджеры</b>"]
@@ -408,7 +375,8 @@ async def messenger(message: Message):
 
 
 @router.message(F.text == "👤 Личный кабинет")
-async def cabinet(message: Message):
+async def cabinet(message: Message, state: FSMContext):
+    await state.clear()
     if await ensure_access(message) is None:
         return
     if not await user_consented(message.from_user.id):
@@ -417,7 +385,8 @@ async def cabinet(message: Message):
 
 
 @router.message(F.text == "🗂 Мои заявки")
-async def my_leads(message: Message):
+async def my_leads(message: Message, state: FSMContext):
+    await state.clear()
     role = await ensure_access(message)
     if role is None:
         return
@@ -433,7 +402,8 @@ async def my_leads(message: Message):
 
 
 @router.message(F.text == "📌 Статус заявки")
-async def status(message: Message):
+async def status(message: Message, state: FSMContext):
+    await state.clear()
     role = await ensure_access(message)
     if role is None:
         return
@@ -453,6 +423,10 @@ async def delete_my_data(message: Message, state: FSMContext):
     await message.answer("Удалить данные профиля и все заявки? Это действие необратимо.", reply_markup=delete_confirmation_keyboard())
 
 
+class DeleteForm(StatesGroup):
+    confirm = State()
+
+
 @router.message(DeleteForm.confirm, F.text == "🗑 Да, удалить")
 async def confirm_delete(message: Message, state: FSMContext):
     role = await ensure_access(message)
@@ -460,6 +434,7 @@ async def confirm_delete(message: Message, state: FSMContext):
         return
     async with SessionLocal() as session:
         await session.execute(delete(Lead).where(Lead.telegram_id == message.from_user.id))
+        await session.execute(delete(SecurityAudit).where(SecurityAudit.actor_telegram_id == int(audit_actor_ref(message.from_user.id)[:15], 16)))
         await session.execute(delete(User).where(User.telegram_id == message.from_user.id))
         await session.commit()
     await state.clear()
@@ -476,7 +451,8 @@ async def cancel_delete(message: Message, state: FSMContext):
 
 
 @router.message(F.text == "ℹ️ О нас")
-async def about(message: Message):
+async def about(message: Message, state: FSMContext):
+    await state.clear()
     role = await ensure_access(message)
     if role is None:
         return
@@ -489,7 +465,8 @@ async def about(message: Message):
 
 
 @router.message(F.text == "◀️ К услугам")
-async def back_services(message: Message):
+async def back_services(message: Message, state: FSMContext):
+    await state.clear()
     if await ensure_access(message) is None:
         return
     await message.answer("Выберите услугу:", reply_markup=services_keyboard())
