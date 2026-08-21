@@ -7,7 +7,7 @@ from sqlalchemy import delete, func, select
 from config import ADMIN_IDS
 from database import SessionLocal
 from handlers import audit, get_role, tester_ids
-from keyboards import admin_keyboard, admin_leads_keyboard, admin_status_keyboard, admin_testers_keyboard, back_keyboard
+from keyboards import admin_keyboard, admin_leads_keyboard, admin_status_keyboard, admin_testers_keyboard, back_keyboard, main_keyboard
 from models import Lead, SecurityAudit, Tester, User
 from security import decrypt
 
@@ -46,7 +46,8 @@ async def menu(message: Message, state: FSMContext):
 
 
 @router.message(F.text == "👥 Тестировщики")
-async def testers(message: Message):
+async def testers(message: Message, state: FSMContext):
+    await state.clear()
     if not await is_admin(message):
         return await deny(message)
     ids = sorted(x for x in await tester_ids() if x not in ADMIN_IDS)
@@ -56,6 +57,7 @@ async def testers(message: Message):
 
 @router.message(F.text == "➕ Добавить тестировщика")
 async def add_start(message: Message, state: FSMContext):
+    await state.clear()
     if not await is_admin(message):
         return await deny(message)
     await state.set_state(TesterForm.add_id)
@@ -66,6 +68,12 @@ async def add_start(message: Message, state: FSMContext):
 async def add_tester(message: Message, state: FSMContext):
     if not await is_admin(message):
         return await deny(message)
+    if message.text in {"🔙 В админ-меню", "◀️ В главное меню"}:
+        await state.clear()
+        if message.text == "🔙 В админ-меню":
+            return await message.answer("<b>🔐 Панель администратора</b>", reply_markup=admin_keyboard())
+        from keyboards import main_keyboard
+        return await message.answer("<b>Главное меню</b>", reply_markup=main_keyboard("admin"))
     try:
         tid = int((message.text or "").strip())
     except ValueError:
@@ -84,6 +92,7 @@ async def add_tester(message: Message, state: FSMContext):
 
 @router.message(F.text == "➖ Удалить тестировщика")
 async def remove_start(message: Message, state: FSMContext):
+    await state.clear()
     if not await is_admin(message):
         return await deny(message)
     await state.set_state(TesterForm.remove_id)
@@ -94,6 +103,12 @@ async def remove_start(message: Message, state: FSMContext):
 async def remove_tester(message: Message, state: FSMContext):
     if not await is_admin(message):
         return await deny(message)
+    if message.text in {"🔙 В админ-меню", "◀️ В главное меню"}:
+        await state.clear()
+        if message.text == "🔙 В админ-меню":
+            return await message.answer("<b>🔐 Панель администратора</b>", reply_markup=admin_keyboard())
+        from keyboards import main_keyboard
+        return await message.answer("<b>Главное меню</b>", reply_markup=main_keyboard("admin"))
     try:
         tid = int((message.text or "").strip())
     except ValueError:
@@ -109,7 +124,8 @@ async def remove_tester(message: Message, state: FSMContext):
 
 
 @router.message(F.text == "📋 Заявки")
-async def leads(message: Message):
+async def leads(message: Message, state: FSMContext):
+    await state.clear()
     if not await is_admin(message):
         return await deny(message)
     async with SessionLocal() as session:
@@ -124,6 +140,7 @@ async def leads(message: Message):
 
 @router.message(F.text == "✏️ Изменить статус")
 async def status_start(message: Message, state: FSMContext):
+    await state.clear()
     if not await is_admin(message):
         return await deny(message)
     await state.set_state(LeadForm.status_id)
@@ -134,6 +151,12 @@ async def status_start(message: Message, state: FSMContext):
 async def status_id(message: Message, state: FSMContext):
     if not await is_admin(message):
         return await deny(message)
+    if message.text in {"🔙 В админ-меню", "◀️ В главное меню"}:
+        await state.clear()
+        if message.text == "🔙 В админ-меню":
+            return await message.answer("<b>🔐 Панель администратора</b>", reply_markup=admin_keyboard())
+        from keyboards import main_keyboard
+        return await message.answer("<b>Главное меню</b>", reply_markup=main_keyboard("admin"))
     try:
         lid = int((message.text or "").strip())
     except ValueError:
@@ -151,6 +174,12 @@ async def status_id(message: Message, state: FSMContext):
 async def set_status(message: Message, state: FSMContext):
     if not await is_admin(message):
         return await deny(message)
+    if message.text in {"🔙 В админ-меню", "◀️ В главное меню"}:
+        await state.clear()
+        if message.text == "🔙 В админ-меню":
+            return await message.answer("<b>🔐 Панель администратора</b>", reply_markup=admin_keyboard())
+        from keyboards import main_keyboard
+        return await message.answer("<b>Главное меню</b>", reply_markup=main_keyboard("admin"))
     allowed = {"🆕 Новая": "Новая", "📞 Связались": "Связались", "🟡 В работе": "В работе", "🟢 Завершена": "Завершена", "🔴 Отменена": "Отменена"}
     if message.text not in allowed:
         return await message.answer("Выберите статус кнопкой.", reply_markup=admin_status_keyboard())
@@ -168,7 +197,8 @@ async def set_status(message: Message, state: FSMContext):
 
 
 @router.message(F.text == "📊 Статистика")
-async def stats(message: Message):
+async def stats(message: Message, state: FSMContext):
+    await state.clear()
     if not await is_admin(message):
         return await deny(message)
     async with SessionLocal() as session:
@@ -180,7 +210,8 @@ async def stats(message: Message):
 
 
 @router.message(F.text == "🛡 Журнал безопасности")
-async def audit_log(message: Message):
+async def audit_log(message: Message, state: FSMContext):
+    await state.clear()
     if not await is_admin(message):
         return await deny(message)
     async with SessionLocal() as session:
@@ -193,6 +224,7 @@ async def audit_log(message: Message):
 
 @router.message(F.text == "🗑 Удалить данные пользователя")
 async def delete_user_start(message: Message, state: FSMContext):
+    await state.clear()
     if not await is_admin(message):
         return await deny(message)
     await state.set_state(UserDeleteForm.telegram_id)
@@ -203,6 +235,12 @@ async def delete_user_start(message: Message, state: FSMContext):
 async def delete_user(message: Message, state: FSMContext):
     if not await is_admin(message):
         return await deny(message)
+    if message.text in {"🔙 В админ-меню", "◀️ В главное меню"}:
+        await state.clear()
+        if message.text == "🔙 В админ-меню":
+            return await message.answer("<b>🔐 Панель администратора</b>", reply_markup=admin_keyboard())
+        from keyboards import main_keyboard
+        return await message.answer("<b>Главное меню</b>", reply_markup=main_keyboard("admin"))
     try:
         tid = int((message.text or "").strip())
     except ValueError:
