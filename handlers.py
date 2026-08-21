@@ -311,14 +311,16 @@ async def submit_existing_profile(
             "Saved-profile lead submission failed for telegram_id=%s",
             message.from_user.id,
         )
+        logger.exception(
+            "Saved-profile lead submission failed for telegram_id=%s",
+            message.from_user.id,
+        )
         await message.answer(
-            "⚠️ Не удалось отправить заявку менеджеру.\n\n"
-            "Ваши сохранённые имя и номер не удалены. "
-            "Попробуйте ещё раз через «Оставить заявку»."
-            ,
+            "⚠️ Не удалось создать заявку. Ваши сохранённые имя и номер "
+            "остались в личном кабинете. Попробуйте ещё раз.",
             reply_markup=main_keyboard(role),
         )
-        return True
+        return False
 
 
 async def start_lead(
@@ -685,7 +687,6 @@ async def lead_phone(
     state: FSMContext,
 ):
     role = await ensure_access(message)
-
     if role is None:
         return
 
@@ -697,27 +698,20 @@ async def lead_phone(
         )
         return
 
-    # Telegram's contact button produces Message.contact and normally
-    # has no text. Therefore this handler MUST process contact first.
-    raw_phone = (
-        message.contact.phone_number
-        if message.contact is not None
-        else (message.text or "")
-    )
-
+    # Telegram contact messages normally have no text, so process
+    # message.contact first.
     if message.contact is not None:
-        if message.contact.user_id not in (
-            None,
-            message.from_user.id,
-        ):
+        if message.contact.user_id not in (None, message.from_user.id):
             await message.answer(
                 "Пожалуйста, отправьте свой номер через кнопку ниже.",
                 reply_markup=phone_keyboard(),
             )
             return
+        raw_phone = message.contact.phone_number
+    else:
+        raw_phone = message.text or ""
 
     phone = normalize_phone(raw_phone)
-
     if not phone:
         await message.answer(
             "Не удалось распознать номер.\n"
@@ -728,11 +722,8 @@ async def lead_phone(
 
     data = await state.get_data()
     name = data.get("name")
-
     if not name:
-        name, _ = await get_user_profile(
-            message.from_user.id
-        )
+        name, _ = await get_user_profile(message.from_user.id)
 
     if not name:
         await state.set_state(LeadForm.name)
@@ -742,56 +733,31 @@ async def lead_phone(
         )
         return
 
-    # Persist the phone BEFORE creating the lead.
-    # Thus the profile remains complete even if a later notification
-    # or audit operation has a problem.
-    await save_user(
-        message,
-        name=name,
-        phone=phone,
-    )
-
+    # Important: receiving a phone number NEVER creates a lead.
+    # It only completes/saves the user's profile. The lead is created
+    # only after the user explicitly presses "Отправить заявку менеджеру".
     try:
-        lead = await create_lead(
-            message.from_user.id,
-            name,
-            phone,
-            data.get("service"),
-        )
-
-        await audit(
-            message.from_user.id,
-            role,
-            "create_lead",
-            "lead",
-            str(lead.id),
-        )
-
-        await notify_manager(
+        await save_user(
             message,
-            lead,
+            name=name,
+            phone=phone,
         )
-
     except Exception:
         logger.exception(
-            "Lead creation failed for telegram_id=%s",
+            "Profile phone save failed for telegram_id=%s",
             message.from_user.id,
         )
-        await state.clear()
         await message.answer(
-            "⚠️ Номер сохранён в личном кабинете, "
-            "но заявку сейчас не удалось создать. "
-            "Попробуйте ещё раз через «Оставить заявку».",
-            reply_markup=main_keyboard(role),
+            "⚠️ Не удалось сохранить номер. Попробуйте отправить его ещё раз.",
+            reply_markup=phone_keyboard(),
         )
         return
 
     await state.clear()
-
     await message.answer(
-        f"✅ Заявка №{lead.id} принята.\n"
-        "Имя и номер сохранены в личном кабинете.",
-        reply_markup=main_keyboard(role),
+        "✅ Номер сохранён в личном кабинете.\n\n"
+        "Имя и номер готовы. Теперь выберите, что сделать:",
+        reply_markup=profile_actions_keyboard(),
     )
 
 
@@ -929,7 +895,6 @@ async def contact_phone(
     state: FSMContext,
 ):
     role = await ensure_access(message)
-
     if role is None:
         return
 
@@ -941,25 +906,18 @@ async def contact_phone(
         )
         return
 
-    raw_phone = (
-        message.contact.phone_number
-        if message.contact is not None
-        else (message.text or "")
-    )
-
     if message.contact is not None:
-        if message.contact.user_id not in (
-            None,
-            message.from_user.id,
-        ):
+        if message.contact.user_id not in (None, message.from_user.id):
             await message.answer(
                 "Пожалуйста, отправьте свой номер через кнопку ниже.",
                 reply_markup=phone_keyboard(),
             )
             return
+        raw_phone = message.contact.phone_number
+    else:
+        raw_phone = message.text or ""
 
     phone = normalize_phone(raw_phone)
-
     if not phone:
         await message.answer(
             "Не удалось распознать номер.\n"
@@ -970,11 +928,8 @@ async def contact_phone(
 
     data = await state.get_data()
     name = data.get("name")
-
     if not name:
-        name, _ = await get_user_profile(
-            message.from_user.id
-        )
+        name, _ = await get_user_profile(message.from_user.id)
 
     if not name:
         await state.set_state(ContactForm.name)
@@ -984,55 +939,30 @@ async def contact_phone(
         )
         return
 
-    # Save the profile first. The profile must not depend on successful
-    # manager notification.
-    await save_user(
-        message,
-        name=name,
-        phone=phone,
-    )
-
+    # Receiving a phone number only saves the profile. The contact lead
+    # is created only after the explicit Reply-keyboard confirmation.
     try:
-        lead = await create_lead(
-            message.from_user.id,
-            name,
-            phone,
-            "Обратная связь",
-        )
-
-        await audit(
-            message.from_user.id,
-            role,
-            "create_contact_request",
-            "lead",
-            str(lead.id),
-        )
-
-        await notify_manager(
+        await save_user(
             message,
-            lead,
+            name=name,
+            phone=phone,
         )
-
     except Exception:
         logger.exception(
-            "Contact request creation failed for telegram_id=%s",
+            "Contact profile phone save failed for telegram_id=%s",
             message.from_user.id,
         )
-        await state.clear()
         await message.answer(
-            "⚠️ Номер сохранён в личном кабинете, "
-            "но запрос сейчас не удалось передать менеджеру. "
-            "Попробуйте ещё раз.",
-            reply_markup=main_keyboard(role),
+            "⚠️ Не удалось сохранить номер. Попробуйте отправить его ещё раз.",
+            reply_markup=phone_keyboard(),
         )
         return
 
     await state.clear()
-
     await message.answer(
-        f"✅ Запрос №{lead.id} передан менеджеру.\n"
-        "Имя и номер сохранены.",
-        reply_markup=main_keyboard(role),
+        "✅ Номер сохранён в личном кабинете.\n\n"
+        "Имя и номер готовы. Передать их менеджеру?",
+        reply_markup=profile_actions_keyboard(contact_mode=True),
     )
 
 
